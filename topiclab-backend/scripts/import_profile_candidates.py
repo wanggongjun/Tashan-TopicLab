@@ -3,7 +3,7 @@
 Read-only by design: the camp adapter opens PostgreSQL in a read-only transaction,
 the forum adapter opens SQLite read-only with WAL visibility, and neither writes source records.
 
-Only four fields are collected. Passwords, codes, sessions, identity documents,
+Only six basic fields are collected. Passwords, codes, sessions, identity documents,
 attachments, submissions, review notes and admin flags are never read.
 
 Examples
@@ -131,6 +131,7 @@ def read_forum_sqlite(path: str, phone_map: str | None) -> list[dict]:
             'phone': phones.get(owner),
             'name': data.get('name'),
             'organization': data.get('organization'),
+            'email': data.get('email'), 'department': data.get('department'),
             'major': data.get('major'),
             'research_direction': data.get('researchDirection'),
             # The forum keeps the timestamp inside the serialized record.
@@ -157,14 +158,17 @@ def candidates_for(source_system: str, record: dict) -> list[dict]:
                    ('organization', record.get('organization'), None),
                    ('major', record.get('major'), None),
                    ('research_direction', record.get('research_direction'), None))
+    mapping += (('email', record.get('email'), None), ('department', record.get('department'), hub.department_note(record.get('organization'))))
     for field, value, note in mapping:
+        if field == 'email' and isinstance(value, str) and not hub.re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value.strip()):
+            continue
         if isinstance(value, str) and value.strip():
             items.append({'field': field, 'value': value.strip()[:hub.FIELD_LIMITS[field]], 'note': note})
     return items
 
 
 def run(source: str, *, dsn=None, export=None, sqlite=None, phone_map=None, source_system=None,
-        limit=None, apply=False) -> dict:
+        limit=None, apply=False, fields=None) -> dict:
     if source == 'camp-postgres':
         records = read_camp_postgres(dsn, limit)
     elif source in ('camp-export', 'profile-export'):
@@ -252,6 +256,8 @@ def run(source: str, *, dsn=None, export=None, sqlite=None, phone_map=None, sour
                     raise ValueError('historical_profiles must contain profile objects')
                 items.extend({**item, 'stamp': iso(historical.get('updated_at'))}
                              for item in candidates_for(source_system, historical))
+            if fields is not None:
+                items = [item for item in items if item['field'] in fields]
             present = {item['field'] for item in items}
             for field in hub.CANDIDATE_FIELDS:
                 if field not in present:

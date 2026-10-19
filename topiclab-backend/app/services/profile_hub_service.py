@@ -24,14 +24,16 @@ from sqlalchemy import text, inspect
 
 from app.storage.database.postgres_client import get_db_session
 
-PROFILE_FIELDS = ('real_name', 'organization', 'major', 'research_direction')
+PROFILE_FIELDS = ('real_name', 'organization', 'major', 'research_direction', 'email', 'department')
 FIELD_LABELS = {
     'real_name': '姓名',
     'organization': '单位',
     'major': '专业',
     'research_direction': '研究方向',
+    'email': '联系邮箱',
+    'department': '院系／部门',
 }
-FIELD_LIMITS = {'real_name': 80, 'organization': 160, 'major': 300, 'research_direction': 2000}
+FIELD_LIMITS = {'real_name': 80, 'organization': 160, 'major': 300, 'research_direction': 2000, 'email': 180, 'department': 300}
 CANDIDATE_FIELDS = PROFILE_FIELDS
 SOURCE_SYSTEMS = ('tashan-association', 'tashan-world', 'tashan-community', 'panshi-camp', 'panshi-forum')
 CLOCK_SKEW = 300
@@ -147,6 +149,10 @@ def apply_schema(session):
           FROM profile_field_sources WHERE true ON CONFLICT DO NOTHING''',
     ]:
         session.execute(text(statement))
+    columns = {c['name'] for c in inspect(session.connection()).get_columns('profile_hub_external_profiles')}
+    for name in ('email', 'department'):
+        if name not in columns:
+            session.execute(text(f'ALTER TABLE profile_hub_external_profiles ADD COLUMN {name} TEXT'))
 
 
 def _now() -> int:
@@ -236,7 +242,7 @@ def import_summary(session, source_system: str) -> dict:
 
 def _confirmed(db, user_id: int) -> dict:
     row = db.execute(text('''SELECT COALESCE(up.version,1) AS version, up.real_name, up.organization,
-        up.major, up.research_direction FROM users u
+        up.major, up.research_direction, up.email, up.department FROM users u
         LEFT JOIN user_profiles up ON up.user_id=u.id WHERE u.id=:uid'''), {'uid': user_id}).mappings().first()
     if not row:
         raise HTTPException(404, '用户不存在')
@@ -323,6 +329,10 @@ def source_timestamp(value):
         return float('-inf')
 
 
+def department_note(organization):
+    return 'o:' + digest(organization.strip())[:30] if isinstance(organization, str) and organization.strip() else None
+
+
 def latest_fields(current, candidates):
     """Choose each nonempty field by source time, never by import time."""
     options = list(candidates)
@@ -330,17 +340,24 @@ def latest_fields(current, candidates):
         if isinstance(value, str) and value.strip():
             provenance = (current or {}).get('sources', {}).get(field) or {}
             options.append({'field': field, 'value': value, 'source_system': provenance.get('source', 'tashan-world'),
-                            'source_updated_at': provenance.get('source_updated_at'), 'id': provenance.get('candidate_id')})
+                            'source_updated_at': provenance.get('source_updated_at'), 'id': provenance.get('candidate_id'),
+                            'field_note': department_note(current['fields'].get('organization')) if field == 'department' else None})
     def rank(item):
         return (source_timestamp(item.get('source_updated_at')), SOURCE_PRIORITY.get(item.get('source_system'), -1),
                 item.get('field_note') != 'combined_field', str(item.get('id') or ''), item.get('value', ''))
     result = {}
     for item in options:
         field, value = item.get('field'), item.get('value')
-        if field not in PROFILE_FIELDS or not isinstance(value, str) or not value.strip():
+        if field not in PROFILE_FIELDS or not isinstance(value, str) or not value.strip() or field == 'department':
             continue
         if field not in result or rank(item) > rank(result[field]):
             result[field] = {**item, 'value': value.strip()}
+    organization = result.get('organization', {}).get('value')
+    departments = [item for item in options if item.get('field') == 'department' and
+                   isinstance(item.get('value'), str) and item['value'].strip() and organization and
+                   item.get('field_note') == department_note(organization)]
+    if departments:
+        result['department'] = max(departments, key=rank)
     return result
 
 
@@ -381,7 +398,8 @@ def sync_by_identity(phone_value, requester, body):
             for field, value in changes.items():
                 upsert_candidate(db, user_id=uid, source_system=requester, source_user_id=event_id,
                                  field=field, value=value, source_updated_at=stamp, batch_id=digest(event_id)[:32],
-                                 phone=phone, phone_verified=True)
+                                 phone=phone, phone_verified=True,
+                                 field_note=department_note(changes.get('organization') or (current or {}).get('fields', {}).get('organization')) if field == 'department' else None)
         latest = latest_fields(current, _candidates(db, phone))
         if not latest:
             return {'found': False, 'profile': {}, 'version': (current or {}).get('version', 1)}
@@ -391,6 +409,8 @@ def sync_by_identity(phone_value, requester, body):
             db.execute(text('INSERT INTO user_profiles(user_id) VALUES (:uid) ON CONFLICT(user_id) DO NOTHING'), {'uid': uid})
         table, column, identifier = ('user_profiles', 'user_id', uid) if uid else ('profile_hub_external_profiles', 'id', external)
         values = {field: item['value'] for field, item in latest.items()}
+        if 'organization' in values and 'department' not in values:
+            values['department'] = ''
         changed = {field: value for field, value in values.items() if (current or {}).get('fields', {}).get(field) != value}
         if changed:
             assignments = ','.join(field + '=:' + field for field in changed)
@@ -425,6 +445,8 @@ def _clean_changes(changes) -> dict:
             continue
         if len(value) > FIELD_LIMITS[field]:
             raise HTTPException(422, '部分资料超出字段长度限制')
+        if field == 'email' and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value):
+            raise HTTPException(422, '邮箱格式不正确')
         cleaned[field] = value
     if not cleaned:
         raise HTTPException(422, '没有可保存的内容')

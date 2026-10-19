@@ -19,7 +19,7 @@ def main():
     apply='--apply' in sys.argv
     summaries=[]
     for source in hub.SOURCE_SYSTEMS:
-        result=importer.run('profile-export',source_system=source,export='/imports/'+source+'.json',apply=apply)
+        result=importer.run('profile-export',source_system=source,export=os.environ.get('PROFILE_IMPORT_DIR','/imports')+'/'+source+'.json',apply=apply,fields=('email','department') if '--contact-fields' in sys.argv else None)
         summaries.append(result)
         print(json.dumps({"sourceCompleted":source,"mode":("apply" if apply else "dry-run"),"records":result["records_read"]}),flush=True)
     print(json.dumps({'imports':summaries},ensure_ascii=False))

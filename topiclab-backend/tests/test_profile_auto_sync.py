@@ -26,7 +26,7 @@ def test_login_sync_materializes_partial_profile_and_stale_retry_does_not_replac
     path.write_text(json.dumps([{'source_user_id':'camp-auto','phone':phone,'name':'Name','organization':'Institute','updated_at':'2026-09-01T00:00:00Z'}]))
     importer.run('camp-export',export=str(path),apply=True)
     first=hub.sync_by_identity(phone,'panshi-forum',{})
-    assert first['profile']=={'real_name':'Name','organization':'Institute'}
+    assert first['profile']=={'real_name':'Name','organization':'Institute','department':''}
     assert hub.sync_by_identity(phone,'panshi-forum',{})['version']==first['version']
     newer={'changes':{'organization':'New Institute'},'event_id':'registration:new:2','source_updated_at':'2026-10-18T00:00:00Z'}
     assert hub.sync_by_identity(phone,'panshi-forum',newer)['profile']['organization']=='New Institute'
@@ -49,3 +49,27 @@ def test_repeated_value_keeps_its_newest_source_time():
             hub.upsert_candidate(db,user_id=None,phone='13900008104',source_system='panshi-camp',source_user_id='same-person',field='organization',value='Institute',source_updated_at=stamp,batch_id='test')
         stamps=db.execute(text("SELECT source_updated_at FROM profile_hub_candidates WHERE phone='13900008104'")).scalars().all()
         assert stamps==['2026-10-01T00:00:00Z']
+
+def test_department_follows_its_organization_and_email_is_shared(tmp_path):
+    phone='13900008109';path=tmp_path/'six-fields.json'
+    path.write_text(json.dumps([{'source_user_id':'six-fields','phone':phone,'organization':'Old school',
+        'department':'Old department','email':'person@example.invalid','updated_at':'2026-01-01T00:00:00Z'}]))
+    importer.run('camp-export',export=str(path),apply=True)
+    first=hub.sync_by_identity(phone,'panshi-forum',{})
+    assert first['profile']['department']=='Old department'
+    assert first['profile']['email']=='person@example.invalid'
+    changed=hub.sync_by_identity(phone,'panshi-forum',{'changes':{'organization':'New school'},
+        'event_id':'new-school-event','source_updated_at':'2026-10-18T00:00:00Z'})
+    assert changed['profile']['department']==''
+    assert hub.sync_by_identity(phone,'panshi-forum',{})['profile']['department']==''
+    with pytest.raises(HTTPException):
+        hub.sync_by_identity(phone,'panshi-forum',{'changes':{'email':'not-an-email'}})
+
+def test_contact_backfill_does_not_reimport_original_four_fields(tmp_path):
+    path=tmp_path/'backfill.json'
+    path.write_text(json.dumps([{'source_user_id':'backfill','phone':'13900008110','name':'Ignored',
+        'organization':'School','department':'Department','email':'contact@example.invalid'}]))
+    importer.run('camp-export',export=str(path),apply=True,fields=('email','department'))
+    with get_db_session() as db:
+        fields=set(db.execute(text("SELECT field FROM profile_hub_candidates WHERE phone='13900008110'")).scalars())
+    assert fields=={'email','department'}

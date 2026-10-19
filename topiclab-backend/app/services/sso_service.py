@@ -296,6 +296,10 @@ def update_profile(client_id, client_secret, token, expected_version, request_ke
             if set(changes)-allowed:
                 raise HTTPException(422, '不支持的统一资料字段')
             updates = {key:value for key,value in changes.items() if key!='display_name'}
+            if 'organization' in updates and 'department' not in updates:
+                old_org = db.execute(text('SELECT organization FROM user_profiles WHERE user_id=:uid'), {'uid':uid}).scalar()
+                if old_org != updates['organization']:
+                    updates['department'] = ''
             if 'identities' in updates: updates['identities']=json.dumps(updates['identities'],ensure_ascii=False)
             assignments = ''.join(', '+key+'=:'+key for key in updates)
             applied = db.execute(text('UPDATE user_profiles SET version=version+1'+assignments+
@@ -315,7 +319,8 @@ def update_profile(client_id, client_secret, token, expected_version, request_ke
                         continue
                     if phone:
                         hub.upsert_candidate(db,user_id=uid,source_system=profile_source,source_user_id=event,
-                            field=field,value=value.strip(),source_updated_at=stamp,batch_id=event[:32],phone=phone,phone_verified=True)
+                            field=field,value=value.strip(),source_updated_at=stamp,batch_id=event[:32],phone=phone,phone_verified=True,
+                            field_note=hub.department_note(db.execute(text('SELECT organization FROM user_profiles WHERE user_id=:uid'), {'uid':uid}).scalar()) if field=='department' else None)
                     db.execute(text('''INSERT INTO profile_hub_provenance(owner_key,field,source,source_updated_at,adopted_at)
                         VALUES (:owner,:field,:source,:stamp,:now) ON CONFLICT(owner_key,field)
                         DO UPDATE SET source=:source,source_updated_at=:stamp,candidate_id=NULL,adopted_at=:now'''),

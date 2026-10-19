@@ -19,7 +19,7 @@ def test_community_reads_aggregate_and_writes_fresh_fields_without_replay_refres
     token=sso.exchange(client['client_id'],client['client_secret'],code,client['redirect_uri'],verifier)['session_token']
     args=dict(client_id=client['client_id'],client_secret=client['client_secret'],session_token=token)
     first=sync(SessionRequest(**args));assert first['user']['profile']['organization']=='Old Institute'
-    req=ProfileUpdateRequest(**args,expected_version=first['user']['profile']['version'],idempotency_key='synthetic-save',changes={'real_name':'Synthetic name','organization':'New Institute','major':'Physics','research_direction':'AI'})
+    req=ProfileUpdateRequest(**args,expected_version=first['user']['profile']['version'],idempotency_key='synthetic-save',changes={'real_name':'Synthetic name','organization':'New Institute','major':'Physics','research_direction':'AI','email':'synthetic@example.invalid','department':'Physics Department'})
     saved=update(req);assert saved['user']['profile']['major']=='Physics'
     with get_db_session() as db:
         before=[tuple(r) for r in db.execute(text("SELECT field,source_updated_at FROM profile_hub_provenance WHERE owner_key=:o ORDER BY field"),{'o':f'central:{uid}'})]
@@ -29,4 +29,7 @@ def test_community_reads_aggregate_and_writes_fresh_fields_without_replay_refres
     assert before==after
     assert hub.sync_by_identity(phone,'panshi-forum',{'subject':f'topiclab:{uid}'})['profile']['organization']=='New Institute'
     assert sync(SessionRequest(**args))['user']['profile']['research_direction']=='AI'
+    latest=hub.sync_by_identity(phone,'panshi-forum',{'subject':f'topiclab:{uid}'})['profile']
+    assert latest['email']=='synthetic@example.invalid'
+    assert latest['department']=='Physics Department'
     with pytest.raises(HTTPException):sync(SessionRequest(**{**args,'session_token':'x'*43}))
